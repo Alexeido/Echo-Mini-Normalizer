@@ -1,12 +1,35 @@
 import os
+import subprocess
 import requests
 import musicbrainzngs
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import ID3
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, TCON, TRCK
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import subprocess
 
-musicbrainzngs.set_useragent("FLACNormalizer", "1.0", "tucorreo@ejemplo.com")
+musicbrainzngs.set_useragent("FLACAutoTagger", "1.0", "tucorreo@ejemplo.com")
+
+def extraer_id3_y_convertir(path):
+    try:
+        tags = ID3(path)
+        audio = FLAC(path)
+
+        # Mapeo de campos ID3 a Vorbis
+        if TIT2 in tags:
+            audio["title"] = tags[TIT2].text[0]
+        if TPE1 in tags:
+            audio["artist"] = tags[TPE1].text[0]
+        if TALB in tags:
+            audio["album"] = tags[TALB].text[0]
+        if TRCK in tags:
+            audio["tracknumber"] = tags[TRCK].text[0]
+        if TCON in tags:
+            audio["genre"] = tags[TCON].text[0]
+
+        audio.save()
+        print(f"🔁 ID3 → Vorbis transferido: {os.path.basename(path)}")
+        return True
+    except Exception:
+        return False
 
 def eliminar_id3(path):
     try:
@@ -30,26 +53,24 @@ def descargar_portada(release_id):
 
 def buscar_portada_por_tags(artist, album):
     try:
-        result = musicbrainzngs.search_releases(artist=artist, release=album, limit=10)
+        result = musicbrainzngs.search_releases(artist=artist, release=album, limit=2)
         for release in result["release-list"]:
-            rid = release["id"]
-            portada = descargar_portada(rid)
+            portada = descargar_portada(release["id"])
             if portada:
                 return portada
-    except Exception as e:
-        print(f"⚠️ Error buscando portada por tags: {e}")
+    except Exception:
+        pass
     return None
 
 def buscar_portada_por_nombre(nombre_archivo):
     try:
-        result = musicbrainzngs.search_releases(query=nombre_archivo, limit=10)
+        result = musicbrainzngs.search_releases(query=nombre_archivo, limit=2)
         for release in result["release-list"]:
-            rid = release["id"]
-            portada = descargar_portada(rid)
+            portada = descargar_portada(release["id"])
             if portada:
                 return portada
-    except Exception as e:
-        print(f"⚠️ Error buscando portada por nombre: {e}")
+    except Exception:
+        pass
     return None
 
 def incrustar_portada(audio, image_data):
@@ -71,8 +92,8 @@ def obtener_genero_por_recording(artist, title):
             if tags:
                 sorted_tags = sorted(tags, key=lambda t: int(t.get("count", 0)), reverse=True)
                 return sorted_tags[0]["name"].capitalize()
-    except Exception as e:
-        print(f"⚠️ Error buscando género por recording: {e}")
+    except Exception:
+        pass
     return None
 
 def obtener_genero_por_artista(artist):
@@ -86,57 +107,57 @@ def obtener_genero_por_artista(artist):
         if tags:
             sorted_tags = sorted(tags, key=lambda t: int(t.get("count", 0)), reverse=True)
             return sorted_tags[0]["name"].capitalize()
-    except Exception as e:
-        print(f"⚠️ Error buscando género por artista: {e}")
+    except Exception:
+        pass
     return None
 
 def procesar_archivo(path):
     try:
-        eliminar_id3(path)
         audio = FLAC(path)
 
-        # ---- GÉNERO ----
+        # 1. Transferir ID3 → Vorbis si hay
+        if os.path.getsize(path) > 0 and "ID3" in subprocess.getoutput(f"metaflac --list \"{path}\""):
+            if extraer_id3_y_convertir(path):
+                eliminar_id3(path)
+                audio = FLAC(path)  # Recargar tras guardado
+
+        # 2. Añadir género si falta
         if "genre" not in audio:
             artist = audio.get("artist", [None])[0]
             title = audio.get("title", [None])[0]
+            genre = None
             if artist and title:
-                print(f"🔍 Buscando género: {artist} - {title}")
                 genre = obtener_genero_por_recording(artist, title)
                 if not genre:
-                    print(f"↪️ Probando con artista: {artist}")
                     genre = obtener_genero_por_artista(artist)
                 if genre:
                     audio["genre"] = genre
-                    print(f"✅ Género añadido: {genre}")
+                    print(f"🎼 Género añadido: {genre}")
                 else:
-                    print("🚫 No se encontró género.")
-            else:
-                print("⚠️ Faltan tags de artista o título para género.")
+                    print(f"🚫 Sin género: {os.path.basename(path)}")
 
-        # ---- PORTADA ----
+        # 3. Añadir portada si falta
         if not tiene_portada(audio):
             artist = audio.get("artist", [None])[0]
             album = audio.get("album", [None])[0]
-            base_name = os.path.splitext(os.path.basename(path))[0]
-
+            base = os.path.splitext(os.path.basename(path))[0]
             portada = None
             if artist and album:
-                print(f"🖼️ Buscando portada por tags: {artist} - {album}")
                 portada = buscar_portada_por_tags(artist, album)
             if not portada:
-                print(f"🔄 Reintentando con nombre: {base_name}")
-                portada = buscar_portada_por_nombre(base_name)
+                portada = buscar_portada_por_nombre(base)
             if portada:
                 incrustar_portada(audio, portada)
-                print(f"✅ Portada embebida.")
+                print(f"🖼️ Portada añadida: {os.path.basename(path)}")
             else:
-                print(f"🚫 No se encontró portada.")
+                print(f"🚫 Sin portada: {os.path.basename(path)}")
 
         audio.save()
-    except Exception as e:
-        print(f"❌ Error procesando {path}: {e}")
 
-def procesar_carpeta(ruta, max_hilos=5):
+    except Exception as e:
+        print(f"❌ Error en {os.path.basename(path)}: {e}")
+
+def procesar_carpeta(ruta, max_hilos=20):
     archivos = [os.path.join(ruta, f) for f in os.listdir(ruta) if f.lower().endswith(".flac")]
     with ThreadPoolExecutor(max_workers=max_hilos) as executor:
         futures = [executor.submit(procesar_archivo, f) for f in archivos]
@@ -144,4 +165,4 @@ def procesar_carpeta(ruta, max_hilos=5):
             pass
 
 # Ejecutar
-procesar_carpeta(".", max_hilos=5)
+procesar_carpeta(".", max_hilos=20)

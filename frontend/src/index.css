@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* (Opcional) ajusta altura de imágenes para que no parpadeen al cargar */
+img { display: block; }
